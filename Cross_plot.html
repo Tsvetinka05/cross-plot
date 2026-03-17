@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="bg">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Cross Plot – Bézier (x(t), y(t))</title>
+  <style>
+    :root{
+  --text:#1f2937;              
+  --muted:#4b5563;
+  --grid:rgba(0,0,0,.12);
+  --axis:#111827;
+  --curve:#d62828; 
+  --curve2:#ef4444;
+  --helper:#6b7280;
+  --pts:#2563eb;
+  --sel:#f59e0b;
+  --stroke:#111827;
+  --accent:#16a34a;
+}
+
+
+    *{ box-sizing:border-box; }
+    body{
+      margin:0;
+       background:#ffffff;
+        color:var(--text);
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+    }
+   header{
+  padding:14px 16px;
+  border-bottom:1px solid #e5e7eb;
+  background:#f3f4f6;
+  position:sticky;
+  top:0;
+  z-index:5;
+}
+
+header h1{
+  margin:0;
+  font-size:18px;
+  font-weight:600;
+  color:#111827;
+}
+
+    .wrap{
+      display:grid;
+      grid-template-columns: 220px 1fr;
+      gap:12px;
+      padding:12px;
+      align-items:start;
+    }
+    .card{
+  background:#f9fafb;
+  border:1px solid #e5e7eb;
+  border-radius:14px;
+  padding:12px;
+  box-shadow:0 6px 16px rgba(0,0,0,.08);
+}
+
+
+    .row{ display:flex; gap:10px; align-items:center; margin-top:10px; }
+    button{
+      width:100%;
+      padding:10px 10px;
+      border-radius:10px;
+      border:1px solid rgba(255,255,255,.10);
+      background:linear-gradient(180deg,rgba(57,217,138,.22),rgba(57,217,138,.10));
+      border:1px solid var(--accent);
+      color:var(--text);
+      cursor:pointer;
+      outline:none;
+      user-select:none;
+    }
+    button:hover{ filter:brightness(1.07); }
+    .stat{
+  margin-top:12px;
+  padding:10px;
+  border-radius:12px;
+  border:1px solid #d1d5db;
+  background:#ffffff;
+  color:#374151;
+  font-size:13px;
+  line-height:1.4;
+}
+
+    .canvasCard{ padding:10px; }
+    canvas{
+  width:100%;
+  height: calc(100vh - 110px);
+  display:block;
+  border-radius:14px;
+  background:#ffffff;
+  border:1px solid #d1d5db;
+}
+
+  </style>
+</head>
+
+<body>
+<header>
+  <h1>Cross Plot – функционална равнинна крива на Bézier (x(t), y(t))</h1>
+</header>
+
+<div class="wrap">
+  <section class="card">
+    <div class="row">
+      <button id="reset">Reset</button>
+    </div>
+    <div class="stat" id="stat"></div>
+  </section>
+
+  <section class="card canvasCard">
+    <canvas id="c"></canvas>
+  </section>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  const resetEl = document.getElementById('reset');
+  const statEl = document.getElementById('stat');
+
+  // фиксиран интервал по t
+  const a = 0, b = 1;
+
+  // контролни ординати (x_i, y_i)
+  let xCtrl = [];
+  let yCtrl = [];
+  let selected = -1;
+
+  // фиксиран изглед
+  let view = { xMin:-1, xMax:1, yMin:-1, yMax:1 };
+
+  // ---------- Math ----------
+  function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+  function choose(n, k){
+    if (k < 0 || k > n) return 0;
+    k = Math.min(k, n-k);
+    let res = 1;
+    for(let i=1;i<=k;i++){
+      res *= (n - (k - i));
+      res /= i;
+    }
+    return res;
+  }
+  function bernstein(n, i, u){
+    return choose(n, i) * Math.pow(u, i) * Math.pow(1-u, n-i);
+  }
+  function evalBezier1D(bArr, t){
+    const n = bArr.length - 1;
+    const u = (t - a) / (b - a);
+    let s = 0;
+    for(let i=0;i<=n;i++) s += bArr[i] * bernstein(n, i, u);
+    return s;
+  }
+
+  function deg(){ return xCtrl.length - 1; }
+  function t_i(i){
+    const n = deg();
+    return a + i*(b-a)/n;
+  }
+
+  function updateStats(){
+    const m = xCtrl.length;
+    statEl.innerHTML =
+      `Точки: ${m}<br/>Степен: ${m >= 2 ? (m-1) : '—'}<br/><br/>` +
+      `Ляв клик в I квадрант: добавя точка<br/>` +
+      `Drag само в I квадрант: мести точка (x,y)<br/>` +
+      `Десен клик върху точка: маха`;
+  }
+
+  // ---------- Layout & mapping ----------
+  function resize(){
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.floor(rect.width * dpr);
+    canvas.height = Math.floor(rect.height * dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+
+  // квадратни квадранти (X и Y еднакви по дължина)
+  function getLayout(){
+    const W = canvas.clientWidth;
+    const H = canvas.clientHeight;
+    const cx = W/2, cy = H/2;
+    const margin = 40;
+    const side = Math.min(cx - margin, cy - margin);
+    return {W,H,cx,cy,margin,qW:side,qH:side};
+  }
+
+  // QI (x,y): X right, Y up
+  function toScreen_QI(x, y, L){
+    const {cx,cy,qW,qH} = L;
+    return {
+      x: cx + (x - view.xMin) / (view.xMax - view.xMin) * qW,
+      y: cy - (y - view.yMin) / (view.yMax - view.yMin) * qH
+    };
+  }
+  function fromScreen_QI(sx, sy, L){
+    const {cx,cy,qW,qH} = L;
+    return {
+      x: view.xMin + (sx - cx) / qW * (view.xMax - view.xMin),
+      y: view.yMin + (cy - sy) / qH * (view.yMax - view.yMin)
+    };
+  }
+
+  // QII (t,y)
+  function toScreen_QII(t, y, L){
+    const {cx,cy,qW,qH} = L;
+    return {
+      x: cx - (t - a) / (b - a) * qW,
+      y: cy - (y - view.yMin) / (view.yMax - view.yMin) * qH
+    };
+  }
+
+  // QIV (x,t)
+  function toScreen_QIV(x, t, L){
+    const {cx,cy,qW,qH} = L;
+    return {
+      x: cx + (x - view.xMin) / (view.xMax - view.xMin) * qW,
+      y: cy + (t - a) / (b - a) * qH
+    };
+  }
+
+  // ---------- Drawing ----------
+  function clear(L){ ctx.clearRect(0,0,L.W,L.H); }
+
+  function drawGridAndAxes(L){
+    const {W,H,cx,cy,margin,qW,qH} = L;
+
+    // grid
+    ctx.save();
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--grid');
+    ctx.lineWidth = 1;
+    const steps = 6;
+
+    // QI
+    for(let s=1;s<steps;s++){
+      const x = cx + s/steps*qW;
+      const y = cy - s/steps*qH;
+      ctx.beginPath(); ctx.moveTo(x, cy - qH); ctx.lineTo(x, cy); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx, y); ctx.lineTo(cx + qW, y); ctx.stroke();
+    }
+    // QII
+    for(let s=1;s<steps;s++){
+      const x = cx - s/steps*qW;
+      const y = cy - s/steps*qH;
+      ctx.beginPath(); ctx.moveTo(x, cy - qH); ctx.lineTo(x, cy); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx - qW, y); ctx.lineTo(cx, y); ctx.stroke();
+    }
+    // QIV
+    for(let s=1;s<steps;s++){
+      const x = cx + s/steps*qW;
+      const y = cy + s/steps*qH;
+      ctx.beginPath(); ctx.moveTo(x, cy); ctx.lineTo(x, cy + qH); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx, y); ctx.lineTo(cx + qW, y); ctx.stroke();
+    }
+    ctx.restore();
+
+    // axes
+    ctx.save();
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--axis');
+    ctx.lineWidth = 2;
+
+    // къса X-ос: само до квадрантите
+    ctx.beginPath();
+    ctx.moveTo(cx - qW, cy);
+    ctx.lineTo(cx + qW, cy);
+    ctx.stroke();
+
+    // Y-ос (както преди)
+    ctx.beginPath();
+    ctx.moveTo(cx, margin);
+    ctx.lineTo(cx, H-margin);
+    ctx.stroke();
+
+    function arrow(x1,y1,x2,y2){
+      const ang = Math.atan2(y2-y1, x2-x1);
+      const len = 10;
+      ctx.beginPath();
+      ctx.moveTo(x2,y2);
+      ctx.lineTo(x2 - len*Math.cos(ang-0.35), y2 - len*Math.sin(ang-0.35));
+      ctx.lineTo(x2 - len*Math.cos(ang+0.35), y2 - len*Math.sin(ang+0.35));
+      ctx.closePath();
+      ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--axis');
+      ctx.fill();
+    }
+
+    arrow(cx,cy, cx + qW, cy); // +X
+    arrow(cx,cy, cx - qW, cy); // -T
+    arrow(cx,cy, cx, margin);  // +Y
+    arrow(cx,cy, cx, H-margin); // +T
+
+    ctx.fillStyle = 'rgba(231,238,247,.92)';
+    ctx.font = '600 14px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+    ctx.fillText('X', cx + qW - 18, cy-10);
+    ctx.fillText('Y', cx+10, margin+18);
+    ctx.fillText('T', cx - qW + 10, cy-10);
+    ctx.fillText('T', cx+10, H-margin-10);
+
+    ctx.fillStyle = 'rgba(159,179,200,.9)';
+    ctx.font = '12px system-ui, -apple-system, Segoe UI, Roboto, Arial';
+    ctx.fillText('(I)  (x(t), y(t))', cx+10, margin+18);
+    ctx.fillText('(II) y(t) спрямо t', cx - qW + 10, margin+18);
+    ctx.fillText('(IV) x(t) спрямо t', cx+10, H-margin-10);
+
+    ctx.restore();
+  }
+
+  function drawPolyline(points, stroke, width=2, dash=null){
+    if(points.length<2) return;
+    ctx.save();
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = width;
+    if(dash) ctx.setLineDash(dash);
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for(let i=1;i<points.length;i++) ctx.lineTo(points[i].x, points[i].y);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawPoints(points, selectedIndex=-1){
+    ctx.save();
+    for(let i=0;i<points.length;i++){
+      const p = points[i];
+      const isSel = (i === selectedIndex);
+      const r = isSel ? 9 : 6;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r, 0, Math.PI*2);
+      ctx.fillStyle = isSel
+        ? getComputedStyle(document.documentElement).getPropertyValue('--sel')
+        : getComputedStyle(document.documentElement).getPropertyValue('--pts');
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--stroke');
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function draw(){
+    const L = getLayout();
+    clear(L);
+    drawGridAndAxes(L);
+    updateStats();
+
+    if(xCtrl.length === 0){
+      requestAnimationFrame(draw);
+      return;
+    }
+
+    const canParam = (xCtrl.length >= 2);
+    const P = Array.from({length:xCtrl.length}, (_,i)=>({x:xCtrl[i], y:yCtrl[i]}));
+    const P_QI = P.map(p => toScreen_QI(p.x, p.y, L));
+
+    if(canParam){
+      const P_QIV = P.map((p,i)=>toScreen_QIV(p.x, t_i(i), L));
+      const P_QII = P.map((p,i)=>toScreen_QII(t_i(i), p.y, L));
+
+      drawPolyline(P_QI,  getComputedStyle(document.documentElement).getPropertyValue('--helper'), 2);
+      drawPolyline(P_QIV, 'rgba(185,199,216,.55)', 2, [6,6]);
+      drawPolyline(P_QII, 'rgba(185,199,216,.55)', 2, [6,6]);
+
+      const samples = 260;
+      const curve_QI  = [];
+      const curve_QIV = [];
+      const curve_QII = [];
+      for(let s=0;s<=samples;s++){
+        const t = a + (b-a)*(s/samples);
+        const x = evalBezier1D(xCtrl, t);
+        const y = evalBezier1D(yCtrl, t);
+        curve_QI.push(toScreen_QI(x,y,L));
+        curve_QIV.push(toScreen_QIV(x,t,L));
+        curve_QII.push(toScreen_QII(t,y,L));
+      }
+      drawPolyline(curve_QI,  getComputedStyle(document.documentElement).getPropertyValue('--curve'), 3);
+      drawPolyline(curve_QIV, getComputedStyle(document.documentElement).getPropertyValue('--curve2'), 2);
+      drawPolyline(curve_QII, getComputedStyle(document.documentElement).getPropertyValue('--curve2'), 2);
+
+      // points in II/IV are visible but will NOT be draggable
+      drawPoints(P_QIV, selected);
+      drawPoints(P_QII, selected);
+    }
+
+    drawPoints(P_QI, selected);
+
+    requestAnimationFrame(draw);
+  }
+
+  // ---------- Interaction ----------
+  const drag = { active:false, idx:-1 };
+
+  function dist2(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return dx*dx+dy*dy; }
+
+  function canvasPos(evt){
+    const rect = canvas.getBoundingClientRect();
+    return { x: (evt.clientX - rect.left), y: (evt.clientY - rect.top) };
+  }
+
+  // pick ONLY decides selection; drag will be allowed only if mode === 'QI'
+  function pickPoint(mx, my){
+    if(xCtrl.length === 0) return {mode:null, idx:-1};
+
+    const L = getLayout();
+    const m = {x:mx, y:my};
+    const P = Array.from({length:xCtrl.length}, (_,i)=>({x:xCtrl[i], y:yCtrl[i]}));
+
+    const lists = [{mode:'QI', pts: P.map(p => toScreen_QI(p.x,p.y,L))}];
+
+    if(xCtrl.length >= 2){
+      lists.push({mode:'QIV', pts: P.map((p,i)=>toScreen_QIV(p.x,t_i(i),L))});
+      lists.push({mode:'QII', pts: P.map((p,i)=>toScreen_QII(t_i(i),p.y,L))});
+    }
+
+    const r2 = 12*12;
+    let best = {mode:null, idx:-1, d:Infinity};
+
+    for(const Ls of lists){
+      for(let i=0;i<Ls.pts.length;i++){
+        const d = dist2(m, Ls.pts[i]);
+        if(d < r2 && d < best.d) best = {mode:Ls.mode, idx:i, d};
+      }
+    }
+    return best;
+  }
+
+  function removePoint(idx){
+    if(idx < 0 || idx >= xCtrl.length) return;
+    xCtrl.splice(idx, 1);
+    yCtrl.splice(idx, 1);
+    selected = (xCtrl.length === 0) ? -1 : clamp(idx, 0, xCtrl.length-1);
+  }
+
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  canvas.addEventListener('mousedown', (evt) => {
+    const p = canvasPos(evt);
+    const L = getLayout();
+    const {cx,cy} = L;
+
+    // right click => remove point
+    if(evt.button === 2){
+      const hit = pickPoint(p.x, p.y);
+      if(hit.idx >= 0) removePoint(hit.idx);
+      return;
+    }
+
+    // left click
+    if(evt.button === 0){
+      const hit = pickPoint(p.x, p.y);
+
+      if(hit.idx >= 0){
+        selected = hit.idx;
+
+        // ✅ ЗАБРАНА: drag ONLY if point was hit in QI
+        if(hit.mode === 'QI'){
+          drag.active = true;
+          drag.idx = hit.idx;
+        }
+        return;
+      }
+
+      // add point only in QI
+      const inQI = (p.x >= cx && p.y <= cy);
+      if(inQI){
+        const w = fromScreen_QI(p.x, p.y, L);
+        xCtrl.push(w.x);
+        yCtrl.push(w.y);
+        selected = xCtrl.length - 1;
+      }
+    }
+  });
+
+  canvas.addEventListener('mousemove', (evt) => {
+    if(!drag.active || drag.idx < 0) return;
+    const p = canvasPos(evt);
+    const L = getLayout();
+
+    // ✅ местене само в QI (x,y)
+    const w = fromScreen_QI(p.x, p.y, L);
+    xCtrl[drag.idx] = w.x;
+    yCtrl[drag.idx] = w.y;
+  });
+
+  window.addEventListener('mouseup', () => {
+    drag.active = false;
+    drag.idx = -1;
+  });
+
+  function resetAll(){
+    xCtrl = [];
+    yCtrl = [];
+    selected = -1;
+    view = { xMin:-1, xMax:1, yMin:-1, yMax:1 };
+  }
+  resetEl.addEventListener('click', resetAll);
+
+  function start(){
+    resize();
+    resetAll();
+    updateStats();
+    draw();
+  }
+  window.addEventListener('resize', resize);
+  start();
+})();
+</script>
+</body>
+</html>
